@@ -278,6 +278,11 @@ void fcgi_set_allowed_clients(char *ip)
 	}
 }
 
+static void fcgi_free_var(char **s)
+{
+	efree(*s);
+}
+
 void fcgi_init_request(fcgi_request *req, int listen_socket)
 {
 	memset(req, 0, sizeof(fcgi_request));
@@ -294,6 +299,11 @@ void fcgi_init_request(fcgi_request *req, int listen_socket)
 #ifdef _WIN32
 	req->tcp = !GetNamedPipeInfo((HANDLE)_get_osfhandle(req->listen_socket), NULL, NULL, NULL, NULL);
 #endif
+
+	/* warmup: do this now so we don't choke when running warmup scripts */
+
+	ALLOC_HASHTABLE(req->env);
+	zend_hash_init(req->env, 0, NULL, (void (*)(void *)) fcgi_free_var, 0);
 }
 
 static inline ssize_t safe_write(fcgi_request *req, const void *buf, size_t count)
@@ -460,7 +470,7 @@ static int fcgi_get_params(fcgi_request *req, unsigned char *p, unsigned char *e
 			break;
 		}
 		if (eff_name_len >= buf_size-1) {
-			if (eff_name_len > ((uint)-1)-64) { 
+			if (eff_name_len > ((uint)-1)-64) {
 				ret = 0;
 				break;
 			}
@@ -485,11 +495,6 @@ static int fcgi_get_params(fcgi_request *req, unsigned char *p, unsigned char *e
 		efree(tmp);
 	}
 	return ret;
-}
-
-static void fcgi_free_var(char **s)
-{
-	efree(*s);
 }
 
 static int fcgi_read_request(fcgi_request *req)
@@ -1004,8 +1009,8 @@ ssize_t fcgi_write(fcgi_request *req, fcgi_request_type type, const char *str, i
 				return -1;
 			}
 			pos += 0xfff8;
-		}		
-		
+		}
+
 		pad = (((len - pos) + 7) & ~7) - (len - pos);
 		rest = pad ? 8 - pad : 0;
 
