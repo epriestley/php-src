@@ -168,6 +168,7 @@ typedef struct _php_cgi_globals_struct {
 	HashTable user_config_cache;
 	char *error_header;
 	char *fpm_config;
+	char *fpm_warmup;
 } php_cgi_globals_struct;
 
 /* {{{ user_config_cache
@@ -262,8 +263,8 @@ static void print_extensions(TSRMLS_D)
 	zend_llist_destroy(&sorted_exts);
 }
 
-#ifndef STDOUT_FILENO	 
-#define STDOUT_FILENO 1	 
+#ifndef STDOUT_FILENO
+#define STDOUT_FILENO 1
 #endif
 
 static inline size_t sapi_cgibin_single_write(const char *str, uint str_length TSRMLS_DC)
@@ -281,8 +282,8 @@ static inline size_t sapi_cgibin_single_write(const char *str, uint str_length T
 	}
 
 	/* sapi has not started, output to stdout instead of fcgi */
-#ifdef PHP_WRITE_STDOUT	 
-	ret = write(STDOUT_FILENO, str, str_length);	 
+#ifdef PHP_WRITE_STDOUT
+	ret = write(STDOUT_FILENO, str, str_length);
 	if (ret <= 0) {
 		return 0;
 	}
@@ -458,7 +459,7 @@ static int sapi_cgi_send_headers(sapi_headers_struct *sapi_headers TSRMLS_DC)
 	while (h) {
 		/* prevent CRLFCRLF */
 		if (h->header_len) {
-			if (h->header_len > sizeof("Status:") - 1 && 
+			if (h->header_len > sizeof("Status:") - 1 &&
 				strncasecmp(h->header, "Status:", sizeof("Status:") - 1) == 0
 			) {
 				if (!ignore_status) {
@@ -702,12 +703,12 @@ static void php_cgi_ini_activate_user_config(char *path, int path_len, const cha
 		}
 
 		/* we have to test if path is part of DOCUMENT_ROOT.
-		  if it is inside the docroot, we scan the tree up to the docroot 
+		  if it is inside the docroot, we scan the tree up to the docroot
 			to find more user.ini, if not we only scan the current path.
 		  */
 #ifdef PHP_WIN32
 		if (strnicmp(s1, s2, s_len) == 0) {
-#else 
+#else
 		if (strncmp(s1, s2, s_len) == 0) {
 #endif
 			ptr = s2 + start;  /* start is the point where doc_root ends! */
@@ -1402,6 +1403,7 @@ PHP_INI_BEGIN()
 	STD_PHP_INI_ENTRY("fastcgi.logging",         "1",  PHP_INI_SYSTEM, OnUpdateBool,   fcgi_logging, php_cgi_globals_struct, php_cgi_globals)
 	STD_PHP_INI_ENTRY("fastcgi.error_header",    NULL, PHP_INI_SYSTEM, OnUpdateString, error_header, php_cgi_globals_struct, php_cgi_globals)
 	STD_PHP_INI_ENTRY("fpm.config",    NULL, PHP_INI_SYSTEM, OnUpdateString, fpm_config, php_cgi_globals_struct, php_cgi_globals)
+	STD_PHP_INI_ENTRY("fpm.warmup",    NULL, PHP_INI_SYSTEM, OnUpdateString, fpm_warmup, php_cgi_globals_struct, php_cgi_globals)
 PHP_INI_END()
 
 /* {{{ php_cgi_globals_ctor
@@ -1418,6 +1420,7 @@ static void php_cgi_globals_ctor(php_cgi_globals_struct *php_cgi_globals TSRMLS_
 	zend_hash_init(&php_cgi_globals->user_config_cache, 0, NULL, (dtor_func_t) user_config_cache_entry_dtor, 1);
 	php_cgi_globals->error_header = NULL;
 	php_cgi_globals->fpm_config = NULL;
+	php_cgi_globals->fpm_warmup = NULL;
 }
 /* }}} */
 
@@ -1495,6 +1498,16 @@ static zend_module_entry cgi_module_entry = {
 	STANDARD_MODULE_PROPERTIES
 };
 
+static int fpm_warmup_start_php(fcgi_request *request) {
+	if (php_request_startup(TSRMLS_C) == FAILURE) {
+		fcgi_finish_request(request, 1);
+		SG(server_context) = NULL;
+		php_module_shutdown(TSRMLS_C);
+		return FAILURE;
+	}
+	return SUCCESS;
+}
+
 /* {{{ main
  */
 int main(int argc, char *argv[])
@@ -1542,7 +1555,7 @@ int main(int argc, char *argv[])
 	sapi_startup(&cgi_sapi_module);
 	cgi_sapi_module.php_ini_path_override = NULL;
 	cgi_sapi_module.php_ini_ignore_cwd = 1;
-	
+
 	fcgi_init();
 
 #ifdef PHP_WIN32
@@ -1613,7 +1626,7 @@ int main(int argc, char *argv[])
 				use_extended_info = 1;
 				break;
 
-			case 't': 
+			case 't':
 				test_conf++;
 				break;
 
@@ -1718,7 +1731,7 @@ int main(int argc, char *argv[])
 #endif
 		return FAILURE;
 	}
-	
+
 	if (use_extended_info) {
 		CG(compiler_options) |= ZEND_COMPILE_EXTENDED_INFO;
 	}
@@ -1779,8 +1792,35 @@ consult the installation file that came with this distribution, or visit \n\
 	/* library is already initialized, now init our request */
 	fcgi_init_request(&request, fcgi_fd);
 
+	char *warmup = CGIG(fpm_warmup);
+
 	zend_first_try {
-		while (fcgi_accept_request(&request) >= 0) {
+		while (true) {
+
+			if (warmup) {
+				request_body_fd = -1;
+				SG(server_context) = (void *) &request;
+				init_request_info(TSRMLS_C);
+				CG(interactive) = 0;
+
+				if (fpm_warmup_start_php(&request) == FAILURE) {
+					return FAILURE;
+				}
+
+				/* warmup: run the warmup script */
+
+				zend_file_handle zfd;
+				zfd.type = ZEND_HANDLE_FILENAME;
+				zfd.filename = warmup;
+				zfd.free_filename = 0;
+				zfd.opened_path = NULL;
+				php_execute_script(&zfd TSRMLS_CC);
+			}
+
+			if (fcgi_accept_request(&request) < 0) {
+				break;
+			}
+
 			request_body_fd = -1;
 			SG(server_context) = (void *) &request;
 			init_request_info(TSRMLS_C);
@@ -1789,13 +1829,14 @@ consult the installation file that came with this distribution, or visit \n\
 
 			fpm_request_info();
 
-			/* request startup only after we've done all we can to
-			 *            get path_translated */
-			if (php_request_startup(TSRMLS_C) == FAILURE) {
-				fcgi_finish_request(&request, 1);
-				SG(server_context) = NULL;
-				php_module_shutdown(TSRMLS_C);
-				return FAILURE;
+			if (warmup) {
+				/* reactive the SAPI to copy POST/ENV back in */
+				sapi_activate(TSRMLS_C);
+				php_hash_environment(TSRMLS_C);
+			} else {
+				if (fpm_warmup_start_php(&request) == FAILURE) {
+					return FAILURE;
+				}
 			}
 
 			/* check if request_method has been sent.
@@ -1825,7 +1866,7 @@ consult the installation file that came with this distribution, or visit \n\
 				goto fastcgi_request_done;
 			}
 
-			/* 
+			/*
 			 * have to duplicate SG(request_info).path_translated to be able to log errrors
 			 * php_fopen_primary_script seems to delete SG(request_info).path_translated on failure
 			 */
