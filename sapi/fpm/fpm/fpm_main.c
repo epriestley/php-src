@@ -1795,7 +1795,7 @@ consult the installation file that came with this distribution, or visit \n\
 	char *warmup = CGIG(fpm_warmup);
 
 	zend_first_try {
-		while (true) {
+		while (1) {
 
 			if (warmup) {
 				request_body_fd = -1;
