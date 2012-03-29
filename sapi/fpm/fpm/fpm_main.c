@@ -1508,6 +1508,18 @@ static int fpm_warmup_start_php(fcgi_request *request) {
 	return SUCCESS;
 }
 
+static void fpm_warmup_free_var(char **s)
+{
+	efree(*s);
+}
+
+static void fpm_warmup_init_request(fcgi_request *request) {
+	if (!request->env) {
+		ALLOC_HASHTABLE(request->env);
+		zend_hash_init(request->env, 0, NULL, (void (*)(void *)) fpm_warmup_free_var, 0);
+	}
+}
+
 /* {{{ main
  */
 int main(int argc, char *argv[])
@@ -1798,6 +1810,8 @@ consult the installation file that came with this distribution, or visit \n\
 		while (1) {
 
 			if (warmup) {
+				fpm_warmup_init_request(&request);
+
 				request_body_fd = -1;
 				SG(server_context) = (void *) &request;
 				init_request_info(TSRMLS_C);
@@ -1814,7 +1828,12 @@ consult the installation file that came with this distribution, or visit \n\
 				zfd.filename = warmup;
 				zfd.free_filename = 0;
 				zfd.opened_path = NULL;
-				php_execute_script(&zfd TSRMLS_CC);
+
+				/* warmup: fake the path so APC takes effect and activates caching
+				   powers; without this, we hit some fast-failure pathways. */
+				SG(request_info).path_translated = warmup;
+					php_execute_script(&zfd TSRMLS_CC);
+				SG(request_info).path_translated = NULL;
 			}
 
 			if (fcgi_accept_request(&request) < 0) {

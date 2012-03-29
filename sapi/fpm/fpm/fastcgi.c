@@ -299,11 +299,6 @@ void fcgi_init_request(fcgi_request *req, int listen_socket)
 #ifdef _WIN32
 	req->tcp = !GetNamedPipeInfo((HANDLE)_get_osfhandle(req->listen_socket), NULL, NULL, NULL, NULL);
 #endif
-
-	/* warmup: do this now so we don't choke when running warmup scripts */
-
-	ALLOC_HASHTABLE(req->env);
-	zend_hash_init(req->env, 0, NULL, (void (*)(void *)) fcgi_free_var, 0);
 }
 
 static inline ssize_t safe_write(fcgi_request *req, const void *buf, size_t count)
@@ -508,8 +503,11 @@ static int fcgi_read_request(fcgi_request *req)
 	req->in_len = 0;
 	req->out_hdr = NULL;
 	req->out_pos = req->out_buf;
-	ALLOC_HASHTABLE(req->env);
-	zend_hash_init(req->env, 0, NULL, (void (*)(void *)) fcgi_free_var, 0);
+
+	if (!req->env) {
+		ALLOC_HASHTABLE(req->env);
+		zend_hash_init(req->env, 0, NULL, (void (*)(void *)) fcgi_free_var, 0);
+	}
 
 	if (safe_read(req, &hdr, sizeof(fcgi_header)) != sizeof(fcgi_header) ||
 	    hdr.version < FCGI_VERSION_1) {
